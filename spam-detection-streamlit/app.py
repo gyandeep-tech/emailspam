@@ -46,6 +46,8 @@ if "default_model_loaded" not in st.session_state:
     st.session_state.default_model_loaded = False
 if "uploaded_file_name" not in st.session_state:
     st.session_state.uploaded_file_name = None
+if "authenticated_email" not in st.session_state:
+    st.session_state.authenticated_email = None
 
 # Sidebar upload
 with st.sidebar:
@@ -118,6 +120,60 @@ with tab2:
         "2. Add your email as a test user\n"
         "3. Add `http://localhost:8080/` to Authorized redirect URIs"
     )
+    
+    # Check if token exists and show current authentication status
+    token_path = Path("token.json")
+    if token_path.exists():
+        try:
+            from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import Request
+            creds = Credentials.from_authorized_user_file(str(token_path), ['https://www.googleapis.com/auth/gmail.readonly'])
+            
+            # Refresh token if expired
+            if creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                    # Save refreshed token
+                    with open(token_path, "w") as token:
+                        token.write(creds.to_json())
+                except:
+                    pass
+            
+            if creds and creds.valid:
+                # Get user info (cache in session state to avoid repeated API calls)
+                if st.session_state.authenticated_email is None:
+                    try:
+                        from googleapiclient.discovery import build
+                        service = build('gmail', 'v1', credentials=creds)
+                        profile = service.users().getProfile(userId='me').execute()
+                        st.session_state.authenticated_email = profile.get('emailAddress', 'Unknown')
+                    except:
+                        st.session_state.authenticated_email = "Unknown"
+                
+                if st.session_state.authenticated_email and st.session_state.authenticated_email != "Unknown":
+                    st.info(f"🔐 Currently authenticated as: **{st.session_state.authenticated_email}**")
+                else:
+                    st.info("🔐 Currently authenticated (email verification required)")
+            else:
+                st.warning("⚠️ Authentication token expired. Please re-authenticate.")
+                st.session_state.authenticated_email = None
+        except:
+            st.warning("⚠️ Authentication token invalid. Please re-authenticate.")
+            st.session_state.authenticated_email = None
+        
+        # Button to clear authentication
+        if st.button("🔄 Switch Account / Clear Authentication", help="This will clear the current authentication and allow you to sign in with a different email"):
+            try:
+                token_path.unlink()
+                st.session_state.authenticated_email = None
+                st.success("✅ Authentication cleared! Click 'Classify Gmail' to authenticate with a different email.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to clear authentication: {e}")
+    else:
+        st.info("ℹ️ No authentication found. Click 'Classify Gmail' to authenticate.")
+        st.session_state.authenticated_email = None
+    
     query = st.text_input("Gmail query", value="in:inbox")
     max_messages = st.number_input("Max messages", min_value=1, max_value=500, value=50)
 
@@ -157,8 +213,11 @@ with tab2:
                 )
             else:
                 try:
+                    # Clear cached email to fetch fresh authentication info after classification
                     with st.spinner("Authenticating and classifying..."):
                         gmail_reader.classify_gmail_messages(save_csv=True, query=query or None, max_messages=int(max_messages))
+                    # Clear cached email so it refreshes on next page load
+                    st.session_state.authenticated_email = None
                     out = Path("gmail_classification_results.csv")
                     if out.exists():
                         df_out = pd.read_csv(out)
